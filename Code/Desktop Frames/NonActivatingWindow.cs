@@ -16,6 +16,24 @@ public class NonActivatingWindow : Window
     private const int WS_EX_NOACTIVATE = 0x08000000;
     private bool _focusPreventionEnabled = true;
 
+    // --- Desktop layer pinning (Fences-style) ---
+    private const int WM_WINDOWPOSCHANGING = 0x0046;
+    private const uint SWP_NOZORDER = 0x0004;
+    private static readonly IntPtr HWND_BOTTOM_PTR = new IntPtr(1);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINDOWPOS
+    {
+        public IntPtr hwnd;
+        public IntPtr hwndInsertAfter;
+        public int x;
+        public int y;
+        public int cx;
+        public int cy;
+        public uint flags;
+    }
+    // --------------------------------------------
+
     // --- Idle Fade-Out Fields ---
     private System.Windows.Threading.DispatcherTimer _idleTimer;
     private bool _isIdleFaded = false;
@@ -35,6 +53,17 @@ public class NonActivatingWindow : Window
 
         const int WM_ENTERSIZEMOVE = 0x0231; // Resizing starts
         const int WM_EXITSIZEMOVE = 0x0232;  // Resizing ends
+
+        // Pin frames to the desktop layer: force every z-order change to the
+        // bottom so frames sit above the wallpaper but below all app windows,
+        // like Stardock Fences. Frames marked Always-On-Top are exempt.
+        if (msg == WM_WINDOWPOSCHANGING && !this.Topmost)
+        {
+            var wp = Marshal.PtrToStructure<WINDOWPOS>(lParam);
+            wp.hwndInsertAfter = HWND_BOTTOM_PTR;
+            wp.flags &= ~SWP_NOZORDER;
+            Marshal.StructureToPtr(wp, lParam, false);
+        }
 
         if (msg == WM_ENTERSIZEMOVE)
         {
