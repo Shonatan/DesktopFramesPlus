@@ -467,6 +467,18 @@ namespace Desktop_Frames
                             _cmbTarget.Items.Add(item);
                         }
                     }
+                    else if (fType == "Data")
+                    {
+                        // FRAME ROUTING: Data frames as targets. Rules pointing at a
+                        // frame route new desktop shortcuts (.lnk/.url) into it.
+                        string fTitle = f is Newtonsoft.Json.Linq.JObject jn ? jn["Title"]?.ToString() : f.GetType().GetProperty("Title")?.GetValue(f)?.ToString();
+
+                        if (!string.IsNullOrEmpty(fTitle))
+                        {
+                            ComboBoxItem item = new ComboBoxItem { Content = $"Add shortcuts to frame: {fTitle}", Tag = OrganizeRule.FrameTargetPrefix + fTitle };
+                            _cmbTarget.Items.Add(item);
+                        }
+                    }
                 }
                 catch { }
             }

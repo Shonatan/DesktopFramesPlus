@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Microsoft.VisualBasic.FileIO; // Required for sending to Recycle Bin
 
 namespace Desktop_Frames
@@ -23,6 +24,20 @@ namespace Desktop_Frames
         public bool IsEnabled { get; set; } = true;
         public int Priority { get; set; } = 0;
         public DateTime? LastRun { get; set; } // NEW: Tracks last execution
+
+        // --- FRAME ROUTING ---
+        // A rule can target a Data frame instead of a folder by using the
+        // "frame:<Title>" scheme in TargetFolderPath. Such rules route new
+        // desktop shortcuts (.lnk/.url) straight into that frame.
+        public const string FrameTargetPrefix = "frame:";
+
+        [JsonIgnore]
+        public bool IsFrameTarget => TargetFolderPath != null &&
+            TargetFolderPath.StartsWith(FrameTargetPrefix, StringComparison.OrdinalIgnoreCase);
+
+        [JsonIgnore]
+        public string TargetFrameTitle => IsFrameTarget ?
+            TargetFolderPath.Substring(FrameTargetPrefix.Length) : null;
     }
 
     public static class AutoOrganizeManager
@@ -133,20 +148,185 @@ namespace Desktop_Frames
             string fileName = Path.GetFileName(filePath);
             string ext = Path.GetExtension(filePath).ToLower();
 
-            // --- THE SHORTCUT SHIELD ---
-            // Ignore virtual items and active temp downloads
-            if (ext == ".lnk" || ext == ".url" || ext == ".crdownload" || ext == ".part" || ext == ".tmp") return;
+            // Ignore active temp downloads
+            if (ext == ".crdownload" || ext == ".part" || ext == ".tmp") return;
+
+            // --- THE SHORTCUT SHIELD (refined) ---
+            // Shortcuts (.lnk/.url) are only handled by frame-routing rules;
+            // folder rules keep ignoring them (original behavior). Regular
+            // files are only handled by folder rules.
+            bool isShortcut = ext == ".lnk" || ext == ".url";
 
             // Sort rules by priority (lower number = higher priority)
             var activeRules = Rules.Where(r => r.IsEnabled).OrderBy(r => r.Priority).ToList();
 
             foreach (var rule in activeRules)
             {
+                if (rule.IsFrameTarget != isShortcut) continue;
+
                 if (DoesFileMatchRule(fileName, rule))
                 {
-                    await ExecuteMoveAsync(filePath, rule);
+                    if (rule.IsFrameTarget)
+                        await ExecuteAddToFrameAsync(filePath, rule);
+                    else
+                        await ExecuteMoveAsync(filePath, rule);
                     break; // File processed, stop checking rules
                 }
+            }
+        }
+
+        /// <summary>
+        /// Routes a desktop shortcut into a Data frame: copies it into the
+        /// profile's Shortcuts folder, appends an item to the frame (tab-aware,
+        /// mirroring the drag-and-drop handler), refreshes the frame UI and
+        /// recycles the desktop original.
+        /// </summary>
+        private static async Task ExecuteAddToFrameAsync(string sourcePath, OrganizeRule rule)
+        {
+            if (!await WaitForFileUnlockAsync(sourcePath, 60000))
+            {
+                LogManager.Log(LogManager.LogLevel.Warn, LogManager.LogCategory.General,
+                    $"Auto-Organize skipped {Path.GetFileName(sourcePath)}: File was locked.");
+                return;
+            }
+
+            dynamic frame = null;
+            foreach (dynamic f in FrameDataManager.FrameData)
+            {
+                try
+                {
+                    string title = f.Title?.ToString();
+                    string itemsType = f.ItemsType?.ToString();
+                    if (itemsType == "Data" && string.Equals(title, rule.TargetFrameTitle, StringComparison.OrdinalIgnoreCase))
+                    {
+                        frame = f;
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            if (frame == null)
+            {
+                LogManager.Log(LogManager.LogLevel.Warn, LogManager.LogCategory.General,
+                    $"Auto-Organize rule '{rule.Name}': target frame '{rule.TargetFrameTitle}' not found.");
+                return;
+            }
+
+            try
+            {
+                string fileName = Path.GetFileName(sourcePath);
+                string ext = Path.GetExtension(sourcePath).ToLower();
+
+                // Shortcut copies live in the profile's Shortcuts folder (the
+                // process CWD is the profile directory, but be explicit).
+                string shortcutsDir = Path.Combine(ProfileManager.CurrentProfileDir, "Shortcuts");
+                if (!Directory.Exists(shortcutsDir)) Directory.CreateDirectory(shortcutsDir);
+
+                string newFileName = fileName;
+                string destPath = Path.Combine(shortcutsDir, newFileName);
+                int counter = 1;
+                while (File.Exists(destPath))
+                {
+                    newFileName = $"{Path.GetFileNameWithoutExtension(fileName)} ({counter++}){ext}";
+                    destPath = Path.Combine(shortcutsDir, newFileName);
+                }
+
+                File.Copy(sourcePath, destPath);
+
+                bool isWebLink = ext == ".url" || CoreUtilities.IsWebLinkShortcut(destPath);
+                bool isFolder = false;
+                if (ext == ".lnk")
+                {
+                    string target = FilePathUtilities.GetShortcutTargetUnicodeSafe(destPath);
+                    isFolder = !string.IsNullOrEmpty(target) && Directory.Exists(target);
+                }
+
+                var newItem = new JObject
+                {
+                    ["Filename"] = Path.Combine("Shortcuts", newFileName),
+                    ["IsFolder"] = isFolder,
+                    ["IsLink"] = isWebLink,
+                    ["IsNetwork"] = false,
+                    ["DisplayName"] = Path.GetFileNameWithoutExtension(fileName),
+                    ["AlwaysRunAsAdmin"] = false
+                };
+
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    // Tab awareness: add to the active tab when tabs are enabled
+                    // (same logic as CopyPasteManager).
+                    JArray targetItems = null;
+                    bool tabsEnabled = frame.TabsEnabled?.ToString().ToLower() == "true";
+
+                    if (tabsEnabled)
+                    {
+                        var tabs = frame.Tabs as JArray;
+                        int currentTabIdx = Convert.ToInt32(frame.CurrentTab?.ToString() ?? "0");
+                        if (tabs != null && currentTabIdx >= 0 && currentTabIdx < tabs.Count)
+                        {
+                            var activeTab = tabs[currentTabIdx] as JObject;
+                            if (activeTab != null)
+                            {
+                                targetItems = activeTab["Items"] as JArray;
+                                if (targetItems == null)
+                                {
+                                    targetItems = new JArray();
+                                    activeTab["Items"] = targetItems;
+                                }
+                            }
+                        }
+                    }
+
+                    if (targetItems == null)
+                    {
+                        targetItems = frame.Items as JArray;
+                        if (targetItems == null)
+                        {
+                            targetItems = new JArray();
+                            frame.Items = targetItems;
+                        }
+                    }
+
+                    newItem["DisplayOrder"] = targetItems.Count;
+                    targetItems.Add(newItem);
+
+                    FrameDataManager.SaveFrameData();
+
+                    var targetWindow = Application.Current.Windows.OfType<NonActivatingWindow>()
+                        .FirstOrDefault(w => w.Tag?.ToString() == frame.Id?.ToString());
+                    if (targetWindow != null)
+                    {
+                        Framemanager.RefreshFrameUsingFormApproach(targetWindow, frame);
+                    }
+                });
+
+                // Remove the desktop original safely (recoverable from Recycle Bin)
+                try
+                {
+                    FileSystem.DeleteFile(sourcePath, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+                }
+                catch (Exception ex)
+                {
+                    LogManager.Log(LogManager.LogLevel.Warn, LogManager.LogCategory.General,
+                        $"Auto-Organize could not recycle desktop original {fileName}: {ex.Message}");
+                }
+
+                LogManager.Log(LogManager.LogLevel.Info, LogManager.LogCategory.General,
+                    $"Auto-Organize added {fileName} to frame '{rule.TargetFrameTitle}'");
+
+                rule.LastRun = DateTime.Now;
+                SaveRules();
+
+                if (SettingsManager.EnableAutoOrganizeNotifications)
+                {
+                    SmartToast.Show($"Rule: {rule.Name} Executed", $"Added '{fileName}' to frame '{rule.TargetFrameTitle}'");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogManager.Log(LogManager.LogLevel.Error, LogManager.LogCategory.General,
+                    $"Auto-Organize failed to add {Path.GetFileName(sourcePath)} to frame: {ex.Message}");
             }
         }
 
