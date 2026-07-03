@@ -249,24 +249,33 @@ namespace Desktop_Frames
                 string targetLower = actualTarget.ToLower();
 
                 // ==========================================
-                // 2. SCAN THE TRUE TARGET FOR CUSTOM PROTOCOLS
+                // 2. EXTRACT CUSTOM ICONS (Steam/Epic game art, etc.)
+                // The shortcut's own IconFile= art takes priority over
+                // the generic protocol icons below.
                 // ==========================================
-                if (targetLower.Contains("spotify:") || targetLower.Contains("spotify.com"))
+                if (Path.GetExtension(filePath)?.ToLower() == ".url")
                 {
-                    extractedIcon = CreateFrozenBitmap("pack://application:,,,/Resources/spotify-White.png");
-                }
-                else if (targetLower.Contains("steam://"))
-                {
-                    extractedIcon = CreateFrozenBitmap("pack://application:,,,/Resources/steam-White.png");
+                    extractedIcon = ExtractCustomIconFromUrl(filePath);
                 }
 
                 // ==========================================
-                // 3. EXTRACT CUSTOM ICONS (Epic Games, etc.)
+                // 3. SCAN THE TRUE TARGET FOR CUSTOM PROTOCOLS
                 // ==========================================
+                if (extractedIcon == null)
+                {
+                    if (targetLower.Contains("spotify:") || targetLower.Contains("spotify.com"))
+                    {
+                        extractedIcon = CreateFrozenBitmap("pack://application:,,,/Resources/spotify-White.png");
+                    }
+                    else if (targetLower.Contains("steam://"))
+                    {
+                        extractedIcon = CreateFrozenBitmap("pack://application:,,,/Resources/steam-White.png");
+                    }
+                }
+
                 if (extractedIcon == null && Path.GetExtension(filePath)?.ToLower() == ".url")
                 {
-                    extractedIcon = ExtractCustomIconFromUrl(filePath);
-                    if (extractedIcon == null) extractedIcon = FreezeIcon(Utility.GetShellIcon(filePath, false));
+                    extractedIcon = FreezeIcon(Utility.GetShellIcon(filePath, false));
                 }
 
                 // ==========================================
@@ -389,8 +398,9 @@ namespace Desktop_Frames
                         OnLoaded = () =>
                         {
                             // Absolute Safety Net: If it's Spotify, lock it in instantly
+                            // (unless the shortcut carries its own custom icon art)
                             string lowerTarget = trueTarget.ToLower();
-                            if (lowerTarget.Contains("spotify:") || lowerTarget.Contains("spotify.com"))
+                            if ((lowerTarget.Contains("spotify:") || lowerTarget.Contains("spotify.com")) && !UrlHasValidCustomIcon(filePath))
                             {
                                 ico.Source = CreateFrozenBitmap("pack://application:,,,/Resources/spotify-White.png");
                             }
@@ -461,11 +471,39 @@ namespace Desktop_Frames
         /// Runs immediately after the UI element is created. Forcefully swaps the icon
         /// if the target contains specific app protocols, bypassing all Windows extraction logic.
         /// </summary>
+        /// <summary>
+        /// Checks whether a .url file carries its own valid IconFile= entry
+        /// (e.g. Steam/Epic per-game art). Such icons take priority over the
+        /// generic protocol overrides.
+        /// </summary>
+        private static bool UrlHasValidCustomIcon(string filePath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(filePath) || !filePath.EndsWith(".url", StringComparison.OrdinalIgnoreCase) || !System.IO.File.Exists(filePath)) return false;
+
+                foreach (string line in System.IO.File.ReadAllLines(filePath))
+                {
+                    if (line.StartsWith("IconFile=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string iconFile = line.Substring(9).Trim();
+                        return !string.IsNullOrEmpty(iconFile) && System.IO.File.Exists(iconFile);
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private static void ApplyPostCreationIconOverride(System.Windows.Controls.Image ico, string filePath)
         {
             try
             {
                 if (string.IsNullOrEmpty(filePath) || !System.IO.File.Exists(filePath)) return;
+
+                // Respect the shortcut's own custom icon (Steam/Epic game art);
+                // only force generic protocol icons when it has none.
+                if (UrlHasValidCustomIcon(filePath)) return;
 
                 string targetToScan = "";
 
