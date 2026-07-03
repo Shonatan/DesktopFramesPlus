@@ -847,7 +847,15 @@ namespace Desktop_Frames
                     {
                         if (cb.Name == "EnableChameleon") SettingsManager.EnableChameleonMode = cb.IsChecked == true;
                         // NEW: Auto-Hide & Fade Options (Moved from General)
-                        if (cb.Name == "AutoHideFrames") { SettingsManager.AutoHideFrames = cb.IsChecked == true; Framemanager.ResetAutoHideTimer(); }
+                        if (cb.Name == "AutoHideFrames")
+                        {
+                            SettingsManager.AutoHideFrames = cb.IsChecked == true;
+                            Framemanager.ResetAutoHideTimer();
+                            // Frames hidden by auto-hide sit at opacity 0 and cannot receive
+                            // mouse input, so they'd stay stranded invisible after the feature
+                            // is turned off. Restore them explicitly.
+                            if (!SettingsManager.AutoHideFrames) Framemanager.WakeUpFrames();
+                        }
                         if (cb.Name == "FramesFadeOutFx") SettingsManager.FramesFadeOutFx = cb.IsChecked == true;
 
                         // NEW: Desktop Icon Visibility
