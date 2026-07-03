@@ -39,6 +39,56 @@ public class NonActivatingWindow : Window
     private bool _isIdleFaded = false;
     // ----------------------------
 
+    // --- Faded hover-wake fields ---
+    // At low fade opacity the window's pixels drop below the alpha threshold
+    // Windows uses for hit-testing, making the frame click-through: it never
+    // receives the MouseMove that would restore it. While faded, poll the
+    // global cursor position instead and wake when it enters the frame.
+    private System.Windows.Threading.DispatcherTimer _hoverPollTimer;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X; public int Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    private void StartHoverPoll()
+    {
+        if (_hoverPollTimer == null)
+        {
+            _hoverPollTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(250)
+            };
+            _hoverPollTimer.Tick += (s, e) =>
+            {
+                if (!_isIdleFaded || this.Visibility != Visibility.Visible)
+                {
+                    _hoverPollTimer.Stop();
+                    return;
+                }
+
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero) return;
+
+                if (GetCursorPos(out POINT pt) && GetWindowRect(hwnd, out RECT rc) &&
+                    pt.X >= rc.Left && pt.X <= rc.Right && pt.Y >= rc.Top && pt.Y <= rc.Bottom)
+                {
+                    _hoverPollTimer.Stop();
+                    RestoreOpacity();
+                }
+            };
+        }
+        _hoverPollTimer.Start();
+    }
+    // -------------------------------
+
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
@@ -262,11 +312,16 @@ public class NonActivatingWindow : Window
         };
 
         this.BeginAnimation(UIElement.OpacityProperty, fadeOut);
+
+        // The faded window may become click-through; watch the cursor globally
+        // so hovering it can still wake it.
+        StartHoverPoll();
     }
 
     public void TriggerWakeUpIdleReset()
     {
         _isIdleFaded = false; // Reset the state since the global manager is forcing opacity to 1.0
+        _hoverPollTimer?.Stop();
 
         if (SettingsManager.FramesFadeOutFx && _idleTimer != null)
         {
